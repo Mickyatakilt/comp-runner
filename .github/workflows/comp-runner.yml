@@ -1,0 +1,56 @@
+name: comp-runner
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+concurrency:
+  group: comp-runner
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Quick check, is anything queued?
+        id: peek
+        env:
+          COMP_WORKER_SECRET: ${{ secrets.COMP_WORKER_SECRET }}
+        run: |
+          out=$(python3 worker.py --peek)
+          echo "queued=$out" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        if: steps.peek.outputs.queued == 'yes'
+        with:
+          node-version: '22'
+      - name: Install Codex CLI
+        if: steps.peek.outputs.queued == 'yes'
+        run: npm install -g @openai/codex@0.169.0
+      - name: Restore refreshed Codex login
+        if: steps.peek.outputs.queued == 'yes'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.codex/auth.json
+          key: codex-auth-none
+          restore-keys: codex-auth-
+      - name: Seed login from secret when no cached login
+        if: steps.peek.outputs.queued == 'yes'
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          mkdir -p ~/.codex
+          if [ ! -s ~/.codex/auth.json ]; then printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json; fi
+          chmod 600 ~/.codex/auth.json
+          codex login status
+      - name: Run comps
+        if: steps.peek.outputs.queued == 'yes'
+        env:
+          COMP_WORKER_SECRET: ${{ secrets.COMP_WORKER_SECRET }}
+          CODEX_BIN: codex
+        run: python3 worker.py --once
+      - name: Save refreshed login
+        if: always() && steps.peek.outputs.queued == 'yes'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.codex/auth.json
+          key: codex-auth-${{ github.run_id }}
