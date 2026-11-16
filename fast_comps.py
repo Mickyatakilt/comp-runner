@@ -10,6 +10,7 @@ Then give the best 4-6 SOLD comps: sold in the last 12 months, start within 0.2 
 For each comp give: address, sold price, sold date, beds, baths, sqft, distance in miles, condition (renovated/good/average/distressed/unknown), the source page URL, and verified=false unless you actually saw the sale price and date on the page.
 Then ONE single best estimated ARV (whole dollars, your best judgment using all you know, not a range) and one short line why.
 ALSO REQUIRED, do not skip: search Zillow, Redfin and Realtor.com for homes CURRENTLY FOR SALE near the subject and return up to 5 ACTIVE listings (within about 1 mile; if fewer than 3 are found widen to 2 miles and say so in notes; similar beds/baths/sqft/style, currently on the market, not sold): for each give address, list price, beds, baths, sqft, distance in miles, days on market, listing status (active/pending/coming soon), and the listing page URL. They are only context for the buyer's competition and are NOT used for the ARV.
+LISTING STATUS: for every sold comp set listing_status to the home's CURRENT status on Zillow/Redfin: sold (closed sale), active (still for sale), pending, coming_soon, or unknown. Prefer homes that are truly sold; never present an active listing as sold.
 HOUSE TYPE: for the subject, every comp and every for-sale listing, set house_type to exactly one of: land (vacant lot), manufactured (mobile/manufactured home), sfh_detached (single family, stand-alone), semi_detached (shares one wall with one neighbor), townhouse_end (row/townhouse end unit), townhouse_interior (row/townhouse interior unit), condo_coop (condo, co-op, apartment style). Use null if you cannot tell. Comps and for-sale listings should be the SAME house type as the subject; do not mix types.
 Rules: never invent a comp or a price. Use null for anything you could not confirm. If fewer than 4 good comps exist, return fewer and say so in notes (do not pad). Put caveats in notes."""
 
@@ -31,9 +32,9 @@ SCHEMA = {
                                    "year_built": _num(0), "lot_sqft": _num(0), "condition": _str(), "house_type": _ht()}},
         "comps": {"type": "array", "maxItems": 6, "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["address", "sold_price", "sold_date", "beds", "baths", "sqft", "distance_mi", "condition", "url", "verified", "house_type"],
+            "required": ["address", "sold_price", "sold_date", "beds", "baths", "sqft", "distance_mi", "condition", "url", "verified", "house_type", "listing_status"],
             "properties": {"address": _str(), "sold_price": _num(0), "sold_date": _str(), "beds": _num(0), "baths": _num(0),
-                           "sqft": _num(0), "distance_mi": _num(0), "condition": _str(), "url": _str(), "verified": {"type": "boolean"}, "house_type": _ht()}}},
+                           "sqft": _num(0), "distance_mi": _num(0), "condition": _str(), "url": _str(), "verified": {"type": "boolean"}, "house_type": _ht(), "listing_status": {"type": ["string", "null"], "enum": ["sold", "active", "pending", "coming_soon", "unknown", None]}}}},
         "active": {"type": "array", "maxItems": 5, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["address", "list_price", "beds", "baths", "sqft", "distance_mi", "days_on_market", "status", "url", "house_type"],
