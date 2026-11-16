@@ -34,15 +34,21 @@ SCHEMA = {
     },
 }
 
-def run(addr, timeout=150):
+def run(addr, extra=None, timeout=150):
     """Returns dict: {"ok":True,"data":{...}} or {"ok":False,"error":"..."}"""
     with tempfile.TemporaryDirectory() as td:
         out, sch = os.path.join(td, "o.json"), os.path.join(td, "schema.json")
         json.dump(SCHEMA, open(sch, "w"))
+        prompt = PROMPT.format(addr=addr)
+        if extra and extra.get("more"):
+            have = "\n".join("- %s, sold $%s on %s, %s sqft" % (c.get("address"), c.get("price"), c.get("date"), c.get("sqft")) for c in (extra.get("exclude") or [])[:14])
+            prompt += ("\n\nTHIS IS A REQUEST FOR MORE COMPS. These comps were already found, do NOT repeat them:\n" + have +
+                       "\nFind up to 6 ADDITIONAL good sold comps. You may widen the search to 0.5 mile and 18 months, and say so in notes. "
+                       "Return only the NEW comps in the comps list. Then give ONE best estimated ARV that considers both the comps above and your new ones.")
         try:
             r = subprocess.run([CODEX, "--search", "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only",
                                 "-C", td, "--output-schema", sch, "-o", out, "-"],
-                               input=PROMPT.format(addr=addr), text=True, capture_output=True, timeout=timeout)
+                               input=prompt, text=True, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": "timeout"}
         if not os.path.exists(out):
