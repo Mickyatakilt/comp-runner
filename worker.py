@@ -29,7 +29,8 @@ def process_one():
     label = "(hidden)" if os.environ.get("CI") else job["address"]   # keep addresses out of public CI logs
     print(time.strftime("%H:%M:%S"), "job", job["id"], label, flush=True)
     try:
-        res = fast_comps.run(job["address"], job.get("extra"))
+        ex = dict(job.get("extra") or {}); ex["lessons"] = job.get("lessons") or []; ex["known_type"] = job.get("known_type")
+        res = fast_comps.run(job["address"], ex)
     except Exception as e:
         res = {"ok": False, "error": repr(e)[:300]}
     call({"action": "complete", "id": job["id"], "ok": res["ok"], "data": res.get("data"), "error": res.get("error")})
