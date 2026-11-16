@@ -47,7 +47,7 @@ jobs:
           CODEX_BIN: codex
         run: python3 worker.py --once
       - name: Save refreshed login
-        if: always() && steps.peek.outputs.queued == 'yes'
+        if: success() && steps.peek.outputs.queued == 'yes'   # never cache a login from a failed run
         uses: actions/cache/save@v4
         with:
           path: ~/.codex/auth.json
