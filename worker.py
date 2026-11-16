@@ -33,7 +33,7 @@ def process_one():
     except Exception as e:
         res = {"ok": False, "error": repr(e)[:300]}
     call({"action": "complete", "id": job["id"], "ok": res["ok"], "data": res.get("data"), "error": res.get("error")})
-    print(time.strftime("%H:%M:%S"), "job", job["id"], "done" if res["ok"] else "FAILED " + str(res.get("error"))[:120], flush=True)
+    print(time.strftime("%H:%M:%S"), "job", job["id"], "done" if res["ok"] else "FAILED (details hidden in CI)" if os.environ.get("CI") else "FAILED " + str(res.get("error"))[:120], flush=True)
     return True
 
 if __name__ == "__main__":

@@ -3,9 +3,7 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
-concurrency:
-  group: comp-runner
-  cancel-in-progress: false
+# no concurrency group: several runs may work at once (comp-worker caps running jobs at 5)
 jobs:
   run:
     runs-on: ubuntu-latest
