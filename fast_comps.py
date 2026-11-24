@@ -141,7 +141,15 @@ def _check(c, subj, today):
 def vet(subject_addr, data, extra=None):
     """Hard-filter comps/active listings, recompute ONE ARV from what survives. Mutates and returns data."""
     today = datetime.date.today()
+    def _f(v):
+        try: return float(str(v).replace(",", "").replace("$", "")) if v not in (None, "") else None
+        except Exception: return None
     subj = data.get("subject") or {}
+    for k in ("sqft", "sqft_public_record", "sqft_listing"): subj[k] = _f(subj.get(k))
+    for c in data.get("comps") or []:
+        if isinstance(c, dict):
+            for k in ("sqft", "sold_price", "distance_mi"): c[k] = _f(c.get(k))
+    extra = dict(extra or {}); extra["exclude"] = [dict(x, price=_f(x.get("price")), sqft=_f(x.get("sqft"))) for x in (extra.get("exclude") or []) if isinstance(x, dict)]
     skey = _key(subject_addr)
     sp0, sl0 = subj.get("sqft_public_record"), subj.get("sqft_listing")
     conflict0 = bool(sp0 and sl0 and abs(sp0 - sl0) / max(sp0, sl0) > 0.2)
@@ -149,6 +157,7 @@ def vet(subject_addr, data, extra=None):
     dropped, pool = [], []
     for c in [x for x in (data.get("comps") or []) if isinstance(x, dict)]:
         if skey and _key(c.get("address")) == skey: dropped.append((c.get("address"), "is the subject itself")); continue
+        c.pop("reject_default", None)
         reasons, flags = _check(c, subj, today)
         c["_flags"] = flags
         if reasons: dropped.append((c.get("address"), "; ".join(reasons))); continue
@@ -161,7 +170,10 @@ def vet(subject_addr, data, extra=None):
         if len(k2) > len(keep): keep, widened = k2, "%.1f mi / %d months" % (WIDEN_MI, WIDEN_MONTHS)
     kept_ids = {id(c) for c in keep}
     for c in pool:
-        if id(c) not in kept_ids: dropped.append((c.get("address"), "%s mi away (limit %.1f)" % (c["_dist"], WIDEN_MI if widened else MAX_MI)))
+        if id(c) not in kept_ids:
+            lim = WIDEN_MI if widened else MAX_MI
+            if c["_dist"] is not None and c["_dist"] > lim: dropped.append((c.get("address"), "%s mi away (limit %.1f)" % (c["_dist"], lim)))
+            else: dropped.append((c.get("address"), "sold too long ago (%d months)" % round(c["_age_mo"] or 0)))
     # soft: prefer same style, but never leave fewer than MIN_GOOD
     same = [c for c in keep if not c["_style_diff"]]
     if len(same) >= MIN_GOOD and len(same) < len(keep):
@@ -198,9 +210,9 @@ def vet(subject_addr, data, extra=None):
         pr = [c["sold_price"] for c in keep if c.get("sold_price")]
         if pr and not subj.get("sqft"): arv = round(statistics.median(pr) / 1000.0) * 1000; why = "Median sold price of %d comps (subject sqft unknown, so not size-adjusted)." % len(pr)
     if ai_arv and arv and abs(ai_arv - arv) / arv > 0.15: why += " (The AI's own guess of $%s was ignored.)" % format(int(ai_arv), ",")
-    level = "high" if (len(basis) >= 4 and not widened and not conflict0) else ("medium" if len(basis) >= MIN_GOOD else "low")
+    nuse = max(len(basis), len(bp)); level = "high" if (nuse >= 4 and not widened and not conflict0) else ("medium" if nuse >= MIN_GOOD else "low")
     if not arv and not why: why = "No usable close comps, so no ARV was set. Add an ARV by hand or try More comps."
-    elif level == "low" and arv: why += " LOW CONFIDENCE: only %d close comp(s)." % len(basis)
+    elif level == "low" and arv: why += " LOW CONFIDENCE: only %d close comp(s)." % nuse
     data["arv"] = {"value": arv, "reason": why}
     for c in keep: c["distance_mi"] = c["_dist"]; c["flags"] = c["_flags"]
     # active listings: not the subject, not a different type, within 2 mi, no duplicates of sold comps
@@ -222,7 +234,7 @@ def vet(subject_addr, data, extra=None):
         for k in [k for k in c if k.startswith("_")]: del c[k]
     subj.pop("_cands", None)
     data["comps"] = keep
-    data["quality"] = {"level": level, "usable": len(basis), "radius_mi": WIDEN_MI if widened else MAX_MI, "widened": widened,
+    data["quality"] = {"level": level, "usable": nuse, "radius_mi": WIDEN_MI if widened else MAX_MI, "widened": widened,
                        "sqft_conflict": conflict, "ai_arv": ai_arv,
                        "dropped": [{"address": a, "why": w} for a, w in dropped][:12]}
     n_drop = len(dropped)
