@@ -167,7 +167,10 @@ def vet(subject_addr, data, extra=None):
     keep, widened = tier(MAX_MI, MONTHS), None
     if len(keep) < MIN_GOOD:
         k2 = tier(WIDEN_MI, WIDEN_MONTHS)
-        if len(k2) > len(keep): keep, widened = k2, "%.1f mi / %d months" % (WIDEN_MI, WIDEN_MONTHS)
+        if len(k2) > len(keep):
+            keep = k2
+            far = any(c["_dist"] > MAX_MI for c in k2); old_ = any((c["_age_mo"] or 0) > MONTHS for c in k2)
+            widened = " / ".join(x for x in ("up to %.1f mi" % WIDEN_MI if far else "", "up to %d months old" % WIDEN_MONTHS if old_ else "") if x)
     kept_ids = {id(c) for c in keep}
     for c in pool:
         if id(c) not in kept_ids:
@@ -234,7 +237,7 @@ def vet(subject_addr, data, extra=None):
         for k in [k for k in c if k.startswith("_")]: del c[k]
     subj.pop("_cands", None)
     data["comps"] = keep
-    data["quality"] = {"level": level, "usable": nuse, "radius_mi": WIDEN_MI if widened else MAX_MI, "widened": widened,
+    data["quality"] = {"level": level, "usable": nuse, "radius_mi": max([c["distance_mi"] for c in keep] + [0]) if keep and widened else MAX_MI, "widened": widened,
                        "sqft_conflict": conflict, "ai_arv": ai_arv,
                        "dropped": [{"address": a, "why": w} for a, w in dropped][:12]}
     n_drop = len(dropped)
