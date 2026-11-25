@@ -8,6 +8,7 @@ CODEX = os.environ.get("CODEX_BIN") or os.path.expanduser("~/.codex-cli/bin/code
 PROMPT = """{addr} - find me comps for the property. Identify the subject property first (beds, baths, sqft, year built, lot size, condition if known).
 For the subject give THREE size numbers when you can find them: sqft_public_record (county/tax record living area), sqft_listing (the number a Zillow/Redfin listing shows), and sqft (the one you consider right, above-grade living area if known). Also give style (one of: colonial, split_level, split_foyer, rambler_ranch, cape_cod, bungalow, contemporary, victorian, other, or null).
 Then give the best 4-6 SOLD comps: sold in the last 12 months. SEARCH THE SUBJECT'S OWN STREET AND THE STREETS AROUND IT FIRST. Stay within 0.5 miles; our code measures every distance by map and THROWS AWAY anything farther, so far-away homes are wasted. Same house style as the subject where possible (set style on every comp), and sqft within about 25% of the subject's.
+SOLD PRICE RULE: sold_price must be the RECORDED CLOSED SALE PRICE from the page's sale/price history (with its sale date). NEVER use a Redfin Estimate, Zestimate, tax value or list price. If a page only shows an estimate, skip that home. Real sale prices are usually round numbers (like $447,000 or $444,900); odd values like $432,221 are estimates and our code will discard them.
 For each comp give: address, sold price, sold date, beds, baths, sqft, distance in miles, condition (renovated/good/average/distressed/unknown), the source page URL, and verified=false unless you actually saw the sale price and date on the page.
 Then ONE single best estimated ARV (whole dollars, your best judgment using all you know, not a range) and one short line why.
 ALSO REQUIRED, do not skip: search Zillow, Redfin and Realtor.com for homes CURRENTLY FOR SALE near the subject and return up to 5 ACTIVE listings (within about 1 mile; if fewer than 3 are found widen to 2 miles and say so in notes; similar beds/baths/sqft/style, currently on the market, not sold): for each give address, list price, beds, baths, sqft, distance in miles, days on market, listing status (active/pending/coming soon), and the listing page URL. They are only context for the buyer's competition and are NOT used for the ARV.
@@ -124,7 +125,13 @@ def _check(c, subj, today):
     elif c.get("dist_src") != "map": flag.append("distance unconfirmed (AI figure)")
     c["_dist"] = dist
     st, ct = subj.get("house_type"), c.get("house_type")
-    if st and ct and st != ct: drop.append("different house type (%s vs %s)" % (ct, st))
+    TH = ("townhouse_end", "townhouse_interior")
+    if st and ct and st != ct:
+        if st in TH and ct in TH: flag.append("%s (subject is %s)" % ("end unit" if ct == "townhouse_end" else "interior unit", "an end unit" if st == "townhouse_end" else "interior"))
+        else: drop.append("different house type (%s vs %s)" % (ct, st))
+    try:
+        if c.get("sold_price") and float(c["sold_price"]) % 100 != 0: drop.append("price $%s looks like a site estimate, not a recorded sale" % format(int(float(c["sold_price"])), ","))
+    except Exception: pass
     sq, cs = subj.get("sqft"), c.get("sqft")
     cands = subj.get("_cands") or ([sq] if sq else [])
     if cands and cs:
