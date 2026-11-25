@@ -247,10 +247,17 @@ def vet(subject_addr, data, extra=None):
     implied = ([v * subj["sqft"] for v in bp] if subj.get("sqft") else []) + plain_prices      # each comp's implied value for the subject
     ai_arv = (data.get("arv") or {}).get("value")
     arv, why, n = None, "", len(bp) + len(plain_prices)
-    pr_all = [c["sold_price"] for c in basis if c.get("sold_price")] + [float(x["price"]) for x in ex if x.get("price")]
+    pr_src = [c for c in chosen if c.get("sold_price")]
+    if len(pr_src) >= 4:      # plain-price path (size unclear): drop prices far from the middle (family sales, bad data)
+        _m = statistics.median(c["sold_price"] for c in pr_src)
+        keepp = [c for c in pr_src if 0.6 * _m <= c["sold_price"] <= 1.6 * _m]
+        for c in pr_src:
+            if c not in keepp and "price outlier" not in c["_flags"]: c["_flags"].append("price outlier"); c["reject_default"] = True
+        pr_src = keepp
+    pr_all = [c["sold_price"] for c in pr_src] + ([] if reno_used else [float(x["price"]) for x in ex if x.get("price")])
     if conflict0 and len(pr_all) >= MIN_GOOD:
         arv = round(statistics.median(pr_all) / 1000.0) * 1000
-        why = "Subject size is unclear (public record %d vs listing %d sqft), so this is the plain median sold price of %d comps, NOT size-adjusted." % (sp0, sl0, len(pr_all))
+        why = "Subject size is unclear (public record %d vs listing %d sqft), so this is the plain median sold price of %d comps%s, NOT size-adjusted." % (sp0, sl0, len(pr_all), " (renovated ones only)" if reno_used else "")
     elif n < MIN_GOOD and (bp or keep or conflict0):
         why = "Only %d usable close comp(s), too few to set a reliable ARV (we need %d). Use Paste MLS comps, More comps, or enter your own ARV." % (n, MIN_GOOD)
     elif implied and subj.get("sqft"):
