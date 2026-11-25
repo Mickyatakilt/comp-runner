@@ -191,6 +191,14 @@ def vet(subject_addr, data, extra=None):
             keep = k2
             far = any(c["_dist"] > MAX_MI for c in k2); old_ = any((c["_age_mo"] or 0) > MONTHS for c in k2)
             widened = " / ".join(x for x in ("up to %.1f mi" % WIDEN_MI if far else "", "up to %d months old" % WIDEN_MONTHS if old_ else "") if x)
+    needs = any(w in str(subj.get("condition") or "").lower() for w in ("distress", "below", "fixer", "as-is", "poor", "needs", "tlc", "gut"))
+    isreno = lambda c: (c.get("condition") or "").lower() == "renovated"
+    if needs and sum(1 for c in keep if isreno(c)) < 2:
+        k3 = tier(WIDEN_MI, WIDEN_MONTHS)
+        if sum(1 for c in k3 if isreno(c)) > sum(1 for c in keep if isreno(c)):
+            keep = k3
+            far = any(c["_dist"] > MAX_MI for c in k3); old_ = any((c["_age_mo"] or 0) > MONTHS for c in k3)
+            widened = " / ".join(x for x in ("up to %.1f mi" % WIDEN_MI if far else "", "up to %d months old" % WIDEN_MONTHS if old_ else "") if x) or widened
     kept_ids = {id(c) for c in keep}
     for c in pool:
         if id(c) not in kept_ids:
@@ -271,7 +279,7 @@ def vet(subject_addr, data, extra=None):
     subj.pop("_cands", None)
     data["comps"] = keep
     data["quality"] = {"level": level, "usable": nuse, "radius_mi": max([c["distance_mi"] for c in keep] + [0]) if keep and widened else MAX_MI, "widened": widened,
-                       "sqft_conflict": conflict, "ai_arv": ai_arv,
+                       "sqft_conflict": conflict, "ai_arv": ai_arv, "needs_work": needs, "reno_n": len(reno) if reno_used else sum(1 for c in basis if isreno(c)),
                        "dropped": [{"address": a, "why": w} for a, w in dropped][:12]}
     n_drop = len(dropped)
     note = "Checked by code: %d comp(s) kept, %d removed (too far, wrong size or type, not sold, or the subject itself)." % (len(keep), n_drop)
@@ -357,7 +365,7 @@ def _run_actor(actor, body, token, timeout=90, cap="0.03"):
         except Exception:
             return None
 
-def map_comps(addr, subj, radius, window, token):
+def map_comps(addr, subj, radius, window, token, max_results=None):
     """Sold homes inside a box around the subject from Redfin's map. Distance is computed here from coordinates. None = lookup failed."""
     import math
     pt = _geo(addr)
@@ -367,7 +375,7 @@ def map_comps(addr, subj, radius, window, token):
     ht = (subj or {}).get("house_type")
     ptype = {"sfh_detached": "house", "townhouse_end": "townhouse", "townhouse_interior": "townhouse", "semi_detached": None, "condo_coop": "condo", "land": "land"}.get(ht)
     flt = ("property-type=%s," % ptype if ptype else "") + "include=%s,viewport=%.5f:%.5f:%.5f:%.5f,no-outline" % (window, la + d, la - d, lo + e, lo - e)
-    rows = _run_actor(MAP_ACTOR, {"searchUrls": [{"url": "https://www.redfin.com/zipcode/%s/filter/%s" % (zm[-1], flt)}], "zoomIn": False, "maxResults": MAP_MAX}, token)
+    rows = _run_actor(MAP_ACTOR, {"searchUrls": [{"url": "https://www.redfin.com/zipcode/%s/filter/%s" % (zm[-1], flt)}], "zoomIn": False, "maxResults": max_results or MAP_MAX}, token, cap="0.05")
     if rows is None: return None
     out = []
     for r in rows:
@@ -456,8 +464,8 @@ def run(addr, extra=None, timeout=210):
     q = data.get("quality") or {}
     if real is not None:
         q["source"] = "redfin"
-        if q.get("usable", 0) < MIN_GOOD and not (extra or {}).get("more"):      # widen once: 1 mile, 2 years (vet still caps age at 18 months)
-            more_rows = map_comps(addr, first.get("subject"), 1.0, "sold-2yr", tok) or real_comps(addr, 1.0, "sold-2yr", tok, first.get("subject"))
+        if (q.get("usable", 0) < MIN_GOOD or (q.get("needs_work") and q.get("reno_n", 0) < 2)) and not (extra or {}).get("more"):      # widen once: 1 mile, 2 years (vet still caps age at 18 months)
+            more_rows = map_comps(addr, first.get("subject"), 1.0, "sold-2yr", tok, 60) or real_comps(addr, 1.0, "sold-2yr", tok, first.get("subject"))
             if more_rows:
                 seen = {_key(c.get("address")) for c in raw_comps}
                 raw_comps += [c for c in more_rows if _key(c.get("address")) not in seen]
