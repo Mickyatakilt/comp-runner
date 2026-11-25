@@ -45,6 +45,7 @@ jobs:
         env:
           COMP_WORKER_SECRET: ${{ secrets.COMP_WORKER_SECRET }}
           CODEX_BIN: codex
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: python3 worker.py --once
       - name: Save refreshed login
         if: success() && steps.peek.outputs.queued == 'yes'   # never cache a login from a failed run

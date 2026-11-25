@@ -1,7 +1,7 @@
 """FAST mode: Codex (ChatGPT plan) searches the web for comps + ARV, like asking ChatGPT. No Claude, no API credit.
 Returns STRUCTURED JSON (dict). Everything is UNVERIFIED (web pages, not confirmed sales).
 Run: python fast_comps.py "<address>"   -> prints JSON"""
-import json, os, subprocess, sys, tempfile, time
+import copy, json, os, subprocess, sys, tempfile, time
 
 CODEX = os.environ.get("CODEX_BIN") or os.path.expanduser("~/.codex-cli/bin/codex")
 
@@ -111,9 +111,11 @@ def _mi(c):
     try: return float(c.get("distance_mi"))
     except Exception: return None
 
+TH = ("townhouse_end", "townhouse_interior")
 def _check(c, subj, today):
     """Return (reasons_to_drop, soft_flags) for one sold comp."""
     drop, flag = [], []
+    st, ct = subj.get("house_type"), c.get("house_type")
     if not c.get("address") or not c.get("sold_price"): drop.append("missing address or price")
     if c.get("listing_status") in NOT_SOLD: drop.append("not sold yet (%s)" % c.get("listing_status"))
     d = _date(c.get("sold_date"))
@@ -125,23 +127,34 @@ def _check(c, subj, today):
     elif c.get("dist_src") != "map": flag.append("distance unconfirmed (AI figure)")
     c["_dist"] = dist
     st, ct = subj.get("house_type"), c.get("house_type")
-    TH = ("townhouse_end", "townhouse_interior")
     if st and ct and st != ct:
-        if st in TH and ct in TH: flag.append("%s (subject is %s)" % ("end unit" if ct == "townhouse_end" else "interior unit", "an end unit" if st == "townhouse_end" else "interior"))
+        if st in TH and ct in TH and c.get("src_trusted"): pass          # real records say just "Townhouse": end vs interior unknown, allow
+        elif st in TH and ct in TH: flag.append("%s (subject is %s)" % ("end unit" if ct == "townhouse_end" else "interior unit", "an end unit" if st == "townhouse_end" else "interior"))
         else: drop.append("different house type (%s vs %s)" % (ct, st))
     try:
-        if c.get("sold_price") and float(c["sold_price"]) % 100 != 0: drop.append("price $%s looks like a site estimate, not a recorded sale" % format(int(float(c["sold_price"])), ","))
+        if not c.get("src_trusted") and c.get("sold_price") and float(c["sold_price"]) % 100 != 0: drop.append("price $%s looks like a site estimate, not a recorded sale" % format(int(float(c["sold_price"])), ","))
     except Exception: pass
     sq, cs = subj.get("sqft"), c.get("sqft")
     cands = subj.get("_cands") or ([sq] if sq else [])
     if cands and cs:
-        if all(abs(cs - x) / x > SQFT_BAND for x in cands): drop.append("size %s sqft vs subject %s" % (int(cs), "/".join(str(int(x)) for x in cands))); 
+        if all(abs(cs - x) / x > SQFT_BAND for x in cands):
+            try:
+                tight = (c.get("src_trusted") and c.get("distance_mi") is not None and float(c["distance_mi"]) <= 0.25 and ct and st and (ct == st or (ct in TH and st in TH))
+                         and subj.get("year_built") and c.get("year_built") and abs(subj["year_built"] - c["year_built"]) <= 3
+                         and subj.get("beds") and c.get("beds") and abs(subj["beds"] - c["beds"]) <= 1)
+            except Exception: tight = False
+            if tight: flag.append("size differs (finished basement?), price used as-is"); c["_plain"] = True
+            else: drop.append("size %s sqft vs subject %s" % (int(cs), "/".join(str(int(x)) for x in cands)))
     elif cands and not cs: flag.append("no sqft")
     elif sq and cs:
         pass
     elif not cs: flag.append("no sqft")
     ss, cst = subj.get("style"), c.get("style")
     c["_style_diff"] = bool(ss and cst and ss != cst and "other" not in (ss, cst))
+    try:
+        if subj.get("year_built") and c.get("year_built") and abs(float(subj["year_built"]) - float(c["year_built"])) > 15:
+            c["_style_diff"] = True; c["_age_note"] = "built %d vs subject %d" % (c["year_built"], subj["year_built"])
+    except Exception: pass
     if (c.get("condition") or "").lower() in ("distressed", "fixer", "poor"): flag.append("distressed sale")
     return drop, flag
 
@@ -188,7 +201,7 @@ def vet(subject_addr, data, extra=None):
     same = [c for c in keep if not c["_style_diff"]]
     if len(same) >= MIN_GOOD and len(same) < len(keep):
         for c in keep:
-            if c["_style_diff"]: dropped.append((c.get("address"), "different style (%s vs %s)" % (c.get("style"), subj.get("style"))))
+            if c["_style_diff"]: dropped.append((c.get("address"), "different age/style (%s)" % (c.get("_age_note") or "%s vs %s" % (c.get("style"), subj.get("style")))))
         keep = same
     keep.sort(key=lambda c: (c["_dist"], c["_age_mo"] or 0))
     keep = keep[:6]
@@ -198,29 +211,32 @@ def vet(subject_addr, data, extra=None):
         try: return float(price) / float(sqft)
         except Exception: return None
     usable = [c for c in keep if "distressed sale" not in c["_flags"] and ppsf(c.get("sold_price"), c.get("sqft"))]
-    allp = [ppsf(c["sold_price"], c["sqft"]) for c in usable] + [v for v in (ppsf(x.get("price"), x.get("sqft")) for x in ex) if v]
+    exp = [v for v in (ppsf(x.get("price"), x.get("sqft")) for x in ex) if v]
+    allp = [ppsf(c["sold_price"], c["sqft"]) for c in usable if not c.get("_plain")] + exp
     med = statistics.median(allp) if allp else None
     for c in usable:
-        if med and len(allp) >= 4 and abs(ppsf(c["sold_price"], c["sqft"]) - med) / med > OUTLIER:
+        if not c.get("_plain") and med and len(allp) >= 4 and abs(ppsf(c["sold_price"], c["sqft"]) - med) / med > OUTLIER:
             c["_flags"].append("price outlier"); c["reject_default"] = True
     basis = [c for c in usable if not c.get("reject_default")]
-    bp = [ppsf(c["sold_price"], c["sqft"]) for c in basis] + [v for v in (ppsf(x.get("price"), x.get("sqft")) for x in ex) if v]
+    bp = [ppsf(c["sold_price"], c["sqft"]) for c in basis if not c.get("_plain")] + exp
+    plain_prices = [float(c["sold_price"]) for c in basis if c.get("_plain")]
+    implied = ([v * subj["sqft"] for v in bp] if subj.get("sqft") else []) + plain_prices      # each comp's implied value for the subject
     ai_arv = (data.get("arv") or {}).get("value")
-    arv, why, n = None, "", len(bp)
+    arv, why, n = None, "", len(bp) + len(plain_prices)
     pr_all = [c["sold_price"] for c in basis if c.get("sold_price")] + [float(x["price"]) for x in ex if x.get("price")]
     if conflict0 and len(pr_all) >= 2:
         arv = round(statistics.median(pr_all) / 1000.0) * 1000
         why = "Subject size is unclear (public record %d vs listing %d sqft), so this is the plain median sold price of %d comps, NOT size-adjusted." % (sp0, sl0, len(pr_all))
-    elif len(bp) < 2 and (bp or keep):
-        why = "Only %d usable close comp(s), too few to set an ARV. Use More comps or enter your own ARV." % len(bp)
-    elif bp and subj.get("sqft"):
-        arv = round(statistics.median(bp) * subj["sqft"] / 1000.0) * 1000
-        why = "Median $%d/sqft of %d sold comps%s x %d sqft." % (round(statistics.median(bp)), n, " within %.1f mi" % (widened and WIDEN_MI or MAX_MI), subj["sqft"])
+    elif n < 2 and (bp or keep):
+        why = "Only %d usable close comp(s), too few to set an ARV. Use More comps or enter your own ARV." % n
+    elif implied and subj.get("sqft"):
+        arv = round(statistics.median(implied) / 1000.0) * 1000
+        why = "Median of %d sold comps within %.1f mi, each scaled to the subject's %d sqft%s." % (len(implied), widened and WIDEN_MI or MAX_MI, subj["sqft"], (" (%d same-block comps with a different size used at their sale price)" % len(plain_prices)) if plain_prices else "")
     elif len(keep) >= 2:
         pr = [c["sold_price"] for c in keep if c.get("sold_price")]
         if pr and not subj.get("sqft"): arv = round(statistics.median(pr) / 1000.0) * 1000; why = "Median sold price of %d comps (subject sqft unknown, so not size-adjusted)." % len(pr)
     if ai_arv and arv and abs(ai_arv - arv) / arv > 0.15: why += " (The AI's own guess of $%s was ignored.)" % format(int(ai_arv), ",")
-    nuse = max(len(basis), len(bp)); level = "high" if (nuse >= 4 and not widened and not conflict0) else ("medium" if nuse >= MIN_GOOD else "low")
+    nuse = max(len(basis), n); level = "high" if (nuse >= 4 and not widened and not conflict0) else ("medium" if nuse >= MIN_GOOD else "low")
     if not arv and not why: why = "No usable close comps, so no ARV was set. Add an ARV by hand or try More comps."
     elif level == "low" and arv: why += " LOW CONFIDENCE: only %d close comp(s)." % nuse
     data["arv"] = {"value": arv, "reason": why}
@@ -253,6 +269,39 @@ def vet(subject_addr, data, extra=None):
     if conflict: note += " " + conflict
     data["notes"] = (note + " " + (data.get("notes") or ""))[:1200]
     return data
+
+
+# ---------------- REAL SOLD RECORDS (Redfin/MLS via Apify, pennies per lookup) ----------------
+APIFY_ACTOR = "swerve~redfin-sold-comps"
+APIFY_MAX_ITEMS = 40            # ~$0.20 max per search at $0.005/result
+def _apify_rows(addr, radius, window, token, timeout=90):
+    """Sold homes around an address from real records. Returns list of rows or None on any failure."""
+    url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=80&maxTotalChargeUsd=0.30" % APIFY_ACTOR
+    body = {"addresses": [addr], "radiusMiles": radius, "soldWindow": window, "maxItems": APIFY_MAX_ITEMS}
+    with tempfile.TemporaryDirectory() as td:
+        hf = os.path.join(td, "h"); open(hf, "w").write("Authorization: Bearer " + token + "\nContent-Type: application/json\n"); os.chmod(hf, 0o600)
+        try:
+            r = subprocess.run(["curl", "-sS", "-m", str(timeout), "-X", "POST", "-H", "@" + hf, "--data-binary", "@-", url],
+                               input=json.dumps(body), text=True, capture_output=True, timeout=timeout + 10)
+            rows = json.loads(r.stdout)
+            return rows if isinstance(rows, list) else None
+        except Exception:
+            return None
+
+def _apify_comp(r):
+    t = (r.get("propertyType") or "").lower()
+    ht = "sfh_detached" if "single" in t else ("townhouse_interior" if "town" in t else ("condo_coop" if "condo" in t else ("land" if "land" in t or "vacant" in t else ("manufactured" if "manufact" in t or "mobile" in t else None))))
+    if not r.get("soldPrice") or not r.get("soldDate") or not r.get("streetAddress"): return None
+    a = r["streetAddress"] + ((" " + r["unitNumber"]) if r.get("unitNumber") and r["unitNumber"] not in r["streetAddress"] else "")
+    return {"address": "%s, %s, %s %s" % (a, r.get("city") or "", r.get("state") or "", r.get("zip") or ""), "sold_price": r["soldPrice"], "sold_date": r["soldDate"],
+            "beds": r.get("beds"), "baths": r.get("baths"), "sqft": r.get("sqFt"), "distance_mi": r.get("distanceMiles"), "dist_src": "map",
+            "condition": None, "url": r.get("url"), "verified": True, "house_type": ht, "listing_status": "sold", "style": None,
+            "year_built": r.get("yearBuilt"), "src_trusted": True, "source": "redfin-" + str(r.get("saleSource") or "record")}
+
+def real_comps(addr, radius, window, token):
+    rows = _apify_rows(addr, radius, window, token)
+    if rows is None: return None
+    return [c for c in (_apify_comp(r) for r in rows if isinstance(r, dict)) if c]
 
 def _codex(prompt, timeout):
     """One Codex web-search call. Returns (data, error)."""
@@ -297,6 +346,16 @@ def run(addr, extra=None, timeout=210):
     if data is None: return {"ok": False, "error": err}
     try: measure_distances(addr, data)
     except Exception: pass
+    tok = os.environ.get("APIFY_TOKEN", "").strip()
+    real = None
+    if tok:
+        more = bool((extra or {}).get("more"))
+        real = real_comps(addr, 1.0 if more else 0.5, "sold-2yr" if more else "sold-1yr", tok)
+        if real is not None:
+            data["comps"] = real
+            data["notes"] = "Comps are real sold records (Redfin/MLS). " + (data.get("notes") or "")
+        else:
+            data["notes"] = "Real sold records were unavailable this time, so these comps come from a web search and are less reliable. " + (data.get("notes") or "")
     raw_comps = list(data.get("comps") or [])
     try:
         import copy
@@ -306,6 +365,18 @@ def run(addr, extra=None, timeout=210):
         data["notes"] = "WARNING: the automatic comp checker failed (%r), so these comps are UNCHECKED. Verify distance and size by hand. %s" % (e, data.get("notes") or "")
         return {"ok": True, "data": data}
     q = data.get("quality") or {}
+    if real is not None:
+        q["source"] = "redfin"
+        if q.get("usable", 0) < MIN_GOOD and not (extra or {}).get("more"):      # widen once: 1 mile, 2 years (vet still caps age at 18 months)
+            more_rows = real_comps(addr, 1.0, "sold-2yr", tok)
+            if more_rows:
+                seen = {_key(c.get("address")) for c in raw_comps}
+                raw_comps += [c for c in more_rows if _key(c.get("address")) not in seen]
+                combo = copy.deepcopy(first); combo["comps"] = raw_comps
+                try:
+                    vet(addr, combo, extra); combo["quality"]["source"] = "redfin"; data = combo
+                except Exception: pass
+        return {"ok": True, "data": data}
     if q.get("usable", 0) < MIN_GOOD and time.time() - t0 < 200 and not (extra or {}).get("more"):
         rej = "\n".join("- %s: %s" % (d["address"], d["why"]) for d in q.get("dropped", []))
         have = "\n".join("- %s" % c.get("address") for c in data.get("comps", []))
