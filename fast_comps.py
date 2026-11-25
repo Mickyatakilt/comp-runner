@@ -94,14 +94,21 @@ WIDEN_MONTHS = 18
 OUTLIER = 0.30          # $/sqft more than 30% off the median is left out of the ARV math (shown unticked)
 NOT_SOLD = ("active", "pending", "coming_soon")
 
+_DIRS = {"n": "north", "s": "south", "e": "east", "w": "west", "ne": "northeast", "nw": "northwest", "se": "southeast", "sw": "southwest"}
 def _key(a):
-    m = re.match(r"\s*(\d+[a-z]?)\s+([a-z0-9]+)", str(a or "").lower())
-    return (m.group(1), m.group(2)) if m else None
+    m = re.match(r"\s*(\d+)(?:-\d+)?[a-z]?\s+(?:([nsew]{1,2}|north|south|east|west|northeast|northwest|southeast|southwest)\.?\s+)?([a-z0-9]+)", str(a or "").lower())
+    if not m: return None
+    street = m.group(3)
+    if m.group(2) and street in ("st", "ave", "rd", "dr", "ct", "ln", "pl", "street", "avenue", "road", "drive", "court", "lane", "place"):     # "123 North St": the direction IS the street name
+        street = _DIRS.get(m.group(2), m.group(2))
+    return (m.group(1), street)
 
 def _date(v):
     v = str(v or "").strip()
     m = re.match(r"(\d{4})-(\d{2})(?:-(\d{2}))?", v)
-    if m: return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3) or 1))
+    if m:
+        try: return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3) or 1))
+        except Exception: return None
     for f in ("%m/%d/%Y", "%b %d, %Y", "%B %d, %Y"):
         try: return datetime.datetime.strptime(v, f).date()
         except Exception: pass
@@ -167,15 +174,32 @@ def _check(c, subj, today):
 def vet(subject_addr, data, extra=None):
     """Hard-filter comps/active listings, recompute ONE ARV from what survives. Mutates and returns data."""
     today = datetime.date.today()
-    def _f(v):
-        try: return float(str(v).replace(",", "").replace("$", "")) if v not in (None, "") else None
+    import math
+    def _f(v, zero_ok=False):
+        try:
+            x = float(str(v).replace(",", "").replace("$", "")) if v not in (None, "") else None
         except Exception: return None
+        if x is None or not math.isfinite(x) or x < 0 or (x == 0 and not zero_ok): return None
+        return x
     subj = data.get("subject") or {}
     for k in ("sqft", "sqft_public_record", "sqft_listing"): subj[k] = _f(subj.get(k))
     for c in data.get("comps") or []:
         if isinstance(c, dict):
-            for k in ("sqft", "sold_price", "distance_mi"): c[k] = _f(c.get(k))
-    extra = dict(extra or {}); extra["exclude"] = [dict(x, price=_f(x.get("price")), sqft=_f(x.get("sqft"))) for x in (extra.get("exclude") or []) if isinstance(x, dict)]
+            for k in ("sqft", "sold_price"): c[k] = _f(c.get(k))
+            c["distance_mi"] = _f(c.get("distance_mi"), zero_ok=True)
+    extra = dict(extra or {})
+    extra["exclude"] = [dict(x, price=_f(x.get("price")), sqft=_f(x.get("sqft"))) for x in (extra.get("exclude") or []) if isinstance(x, dict)]
+    extra["exclude"] = [x for x in extra["exclude"] if x["price"] and x["sqft"]]
+    _exk = {_key(x.get("address")) for x in extra["exclude"]}
+    if _exk and extra.get("more"):                       # more-mode: a comp already in the earlier list must not count twice
+        data["comps"] = [c for c in (data.get("comps") or []) if not (isinstance(c, dict) and _key(c.get("address")) in _exk)]
+    _seen = set(); _uniq = []
+    for c in (data.get("comps") or []):                  # the same address repeated counts once
+        k = _key(c.get("address")) if isinstance(c, dict) else None
+        if k and k in _seen: continue
+        if k: _seen.add(k)
+        _uniq.append(c)
+    data["comps"] = _uniq
     skey = _key(subject_addr)
     sp0, sl0 = subj.get("sqft_public_record"), subj.get("sqft_listing")
     conflict0 = bool(sp0 and sl0 and abs(sp0 - sl0) / max(sp0, sl0) > 0.2)
@@ -241,7 +265,7 @@ def vet(subject_addr, data, extra=None):
     basis = [c for c in usable if not c.get("reject_default")]
     reno = [c for c in basis if (c.get("condition") or "").lower() == "renovated"]
     reno_ok = [c for c in reno if not c.get("_plain")]            # size-matched renovated comps are the solid ones
-    chosen, reno_used = (reno, True) if (len(reno_ok) >= 2 or len(reno) >= 3) else (basis, False)       # after-repair value = what FIXED-UP homes sell for
+    chosen, reno_used = (reno, True) if (len(reno_ok) >= MIN_GOOD or len(reno) >= MIN_GOOD) else (basis, False)       # after-repair value = what FIXED-UP homes sell for
     bp = [ppsf(c["sold_price"], c["sqft"]) for c in chosen if not c.get("_plain")] + ([] if reno_used else exp)
     plain_prices = [float(c["sold_price"]) for c in chosen if c.get("_plain")]
     implied = ([v * subj["sqft"] for v in bp] if subj.get("sqft") else []) + plain_prices      # each comp's implied value for the subject
@@ -266,11 +290,13 @@ def vet(subject_addr, data, extra=None):
         if reno_used: why += " Based on the %d RENOVATED comps (after-repair value), not the as-is sales." % len(reno)
         elif subj.get("condition") and any(w in str(subj["condition"]).lower() for w in ("distress", "below", "fixer", "as-is", "poor", "needs")):
             why += " NOTE: the subject needs work and fewer than 2 comps were clearly renovated, so this may be LOW for a fully fixed-up home."
-    elif len(keep) >= 2:
-        pr = [c["sold_price"] for c in keep if c.get("sold_price")]
-        if pr and not subj.get("sqft"): arv = round(statistics.median(pr) / 1000.0) * 1000; why = "Median sold price of %d comps (subject sqft unknown, so not size-adjusted)." % len(pr)
+    elif len(chosen) >= MIN_GOOD and not subj.get("sqft"):
+        pr = [c["sold_price"] for c in chosen if c.get("sold_price")]
+        if len(pr) >= MIN_GOOD: arv = round(statistics.median(pr) / 1000.0) * 1000; why = "Median sold price of %d comps (subject sqft unknown, so NOT size-adjusted)." % len(pr)
     if ai_arv and arv and abs(ai_arv - arv) / arv > 0.15: why += " (The AI's own guess of $%s was ignored.)" % format(int(ai_arv), ",")
     nuse = max(len(basis), n); level = "high" if (nuse >= 4 and not widened and not conflict0) else ("medium" if nuse >= MIN_GOOD else "low")
+    if not arv: level = "low"
+    elif not subj.get("sqft") or conflict0: level = "medium" if level == "high" else level
     if arv and len(implied) >= 3:
         spread = (max(implied) - min(implied)) / statistics.median(implied)
         if spread > 0.5:
@@ -328,7 +354,7 @@ def _apify_filters(subj):
         sizes = [x for x in (sq, lst, subj.get("sqft")) if x]
         if sizes: f["minSqft"] = int(min(sizes) * 0.5); f["maxSqft"] = int(max(sizes) * 1.7)
         b = subj.get("beds")
-        if b: f["minBeds"] = max(0, int(b) - 1); f["maxBeds"] = int(b) + 1
+        if b and not (float(b) >= 6 and sizes and min(sizes) / float(b) < 320): f["minBeds"] = max(0, int(b) - 1); f["maxBeds"] = int(b) + 1
         ht = subj.get("house_type")
         pt = {"sfh_detached": ["house"], "semi_detached": ["house", "townhouse"], "townhouse_end": ["townhouse"], "townhouse_interior": ["townhouse"], "condo_coop": ["condo"]}.get(ht)
         if pt: f["propertyTypes"] = pt
@@ -352,7 +378,7 @@ def _apify_rows(addr, radius, window, token, timeout=45, filters=None):
 
 def _apify_comp(r):
     t = (r.get("propertyType") or "").lower()
-    ht = "multifamily" if ("multi" in t or "duplex" in t or "plex" in t) else "sfh_detached" if "single" in t else ("townhouse_interior" if "town" in t else ("condo_coop" if "condo" in t else ("land" if "land" in t or "vacant" in t else ("manufactured" if "manufact" in t or "mobile" in t else None))))
+    ht = "multifamily" if ("multi" in t or "duplex" in t or "plex" in t or MULTI_RE.search((r.get("description") or "").lower())) else "sfh_detached" if "single" in t else ("townhouse_interior" if "town" in t else ("condo_coop" if "condo" in t else ("land" if "land" in t or "vacant" in t else ("manufactured" if "manufact" in t or "mobile" in t else None))))
     if not r.get("soldPrice") or not r.get("soldDate") or not r.get("streetAddress"): return None
     a = r["streetAddress"] + ((" " + r["unitNumber"]) if r.get("unitNumber") and r["unitNumber"] not in r["streetAddress"] else "")
     return {"address": "%s, %s, %s %s" % (a, r.get("city") or "", r.get("state") or "", r.get("zip") or ""), "sold_price": r["soldPrice"], "sold_date": r["soldDate"],
@@ -370,7 +396,7 @@ def real_comps(addr, radius, window, token, subj=None):
 MAP_ACTOR = "tri_angle~redfin-search"
 MAP_MAX = 20                     # $0.0005 per home + $0.0035 start: 20 homes = 1.35 cents at most
 _PT_CODE = {6: "sfh_detached", 3: "condo_coop", 13: "townhouse_interior", 4: "multifamily", 8: "land", 10: None}
-MULTI_RE = re.compile(r"\b(duplex|triplex|quadruplex|quadplex|fourplex|four[- ]plex|multi[- ]?family|[2-9][- ]unit|(two|three|four|2|3|4)[- ]units?)\b")
+MULTI_RE = re.compile(r"(?<!not a )(?<!no )\b(duplex|triplex|quadruplex|quadplex|fourplex|four[- ]plex|multi[- ]?family|[2-9][- ]unit|(two|three|four|2|3|4)[- ]units?|(two|three|four|2|3|4)[- ]family|legal (2|two)[- ]family|up[/ ]?(and )?down)\b")
 
 RENO_RE = [re.compile(x) for x in (r"\b(fully|completely|totally|newly|beautifully|meticulously|recently|tastefully|thoughtfully)[ -](renovated|remodeled|remodelled|restored|updated|rehabbed|reimagined)", r"\bgut (renovat|rehab)", r"\bturn[- ]?key\b", r"\bwaterfall\b", r"\bquartz\b", r"\bchef", r"\bdesigner\b", r"\bbrand[- ]new\b", r"\bmodern luxury\b", r"\bnew construction\b", r"\bnew (roof|hvac|kitchen|bath)", r"\bmove[- ]in[- ]ready\b", r"\bfully renovated\b")]
 BAD_RE = [re.compile(x) for x in (r"\bas[- ]is\b", r"\bfixer", r"\binvestor", r"\btlc\b", r"\bneeds? (work|updating|renovation|repairs?|rehab)", r"\bhandyman", r"\bsignificant work\b", r"\bestate sale\b", r"\bbring your (vision|contractor)", r"\bcash (buyer|only)\b", r"\bdated\b", r"\boriginal condition\b", r"\bcourt[- ]ordered\b", r"\bready to renovate\b", r"\bproject house\b", r"\bfor its next chapter\b", r"\bpossibilities are endless\b")]
@@ -422,7 +448,7 @@ def map_comps(addr, subj, radius, window, token, max_results=None):
         out.append({"address": "%s%s, %s, %s %s" % (st, (" " + unit) if unit and unit not in st else "", r.get("city") or "", r.get("state") or "", r.get("zip") or ""),
                     "sold_price": price, "sold_date": date, "beds": r.get("beds"), "baths": r.get("baths"), "sqft": g("sqFt"), "distance_mi": dist, "dist_src": "map",
                     "condition": classify_condition(r.get("listingRemarks")), "url": ("https://www.redfin.com" + r["url"]) if str(r.get("url") or "").startswith("/") else r.get("url"), "verified": True,
-                    "house_type": "multifamily" if MULTI_RE.search((r.get("listingRemarks") or "").lower()) else _PT_CODE.get(r.get("propertyType")), "listing_status": "sold", "style": None, "year_built": g("yearBuilt"),
+                    "house_type": "multifamily" if MULTI_RE.search((r.get("listingRemarks") or "").lower()) else _PT_CODE.get(r.get("propertyType"), "other_type"), "listing_status": "sold", "style": None, "year_built": g("yearBuilt"),
                     "src_trusted": True, "source": "redfin-map"})
     return out
 
@@ -491,6 +517,17 @@ def attach_check(data, t0):
     if ck.get("verdict") == "disagree": q["level"] = "low"
     elif ck.get("verdict") == "mixed" and q.get("level") == "high": q["level"] = "medium"
 
+
+def _clean(o):
+    """JSON-safe: non-finite numbers become null."""
+    import math
+    if isinstance(o, float): return o if math.isfinite(o) else None
+    if isinstance(o, dict): return {k: _clean(v) for k, v in o.items()}
+    if isinstance(o, list): return [_clean(v) for v in o]
+    return o
+
+def _ok(data): return {"ok": True, "data": _clean(data)}
+
 def run(addr, extra=None, timeout=210):
     """Returns dict: {"ok":True,"data":{...}} or {"ok":False,"error":"..."}.
     Pass 1 = AI web search. Then VET (hard filters + our own ARV). If fewer than MIN_GOOD good comps survive,
@@ -537,10 +574,12 @@ def run(addr, extra=None, timeout=210):
         vet(addr, data, extra)
     except Exception as e:           # never lose a result because the checker broke; say so loudly
         data["notes"] = "WARNING: the automatic comp checker failed (%r), so these comps are UNCHECKED. Verify distance and size by hand. %s" % (e, data.get("notes") or "")
-        return {"ok": True, "data": data}
+        data["arv"] = {"value": None, "reason": "The comp checker failed, so no ARV was set (the AI's unchecked guess is not shown). Press Re-run, or use Paste MLS comps."}
+        data["quality"] = {"level": "low", "usable": 0, "radius_mi": None, "checker_failed": True}
+        return _ok(data)
     q = data.get("quality") or {}
     if real is not None:
-        q["source"] = "redfin"
+        q["source"] = "redfin"; q["homes_billed"] = len(real)
         if (q.get("usable", 0) < MIN_GOOD or (q.get("needs_work") and q.get("reno_n", 0) < 2)) and not (extra or {}).get("more") and time.time() - t0 < 200:      # widen once: 1 mile, 2 years (vet still caps age at 18 months)
             more_rows = map_comps(addr, first.get("subject"), 1.0, "sold-2yr", tok, 60) or (real_comps(addr, 1.0, "sold-2yr", tok, first.get("subject")) if time.time() - t0 < 230 else None)
             if more_rows:
@@ -548,14 +587,14 @@ def run(addr, extra=None, timeout=210):
                 raw_comps += [c for c in more_rows if _key(c.get("address")) not in seen]
                 combo = copy.deepcopy(first); combo["comps"] = raw_comps
                 try:
-                    vet(addr, combo, extra); combo["quality"]["source"] = "redfin"
+                    vet(addr, combo, extra); combo["quality"]["source"] = "redfin"; combo["quality"]["homes_billed"] = len(real) + len(more_rows)
                     combo["quality"]["wide_lookup"] = {"homes": len(more_rows), "renovated_seen": sum(1 for c in more_rows if c.get("condition") == "renovated")}
                     data = combo
                 except Exception as e: data["quality"]["wide_lookup_error"] = repr(e)[:200]
             else:
                 data["quality"]["wide_lookup"] = {"homes": 0}
         if not (extra or {}).get("more"): attach_check(data, t0)
-        return {"ok": True, "data": data}
+        return _ok(data)
     if q.get("usable", 0) < MIN_GOOD and time.time() - t0 < 200 and not (extra or {}).get("more"):
         rej = "\n".join("- %s: %s" % (d["address"], d["why"]) for d in q.get("dropped", []))
         have = "\n".join("- %s" % c.get("address") for c in data.get("comps", []))
@@ -576,7 +615,7 @@ def run(addr, extra=None, timeout=210):
             except Exception:
                 pass
     if not (extra or {}).get("more"): attach_check(data, t0)
-    return {"ok": True, "data": data}
+    return _ok(data)
 
 if __name__ == "__main__":
     print(json.dumps(run(" ".join(sys.argv[1:])), indent=2))
