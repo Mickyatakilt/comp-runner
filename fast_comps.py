@@ -218,8 +218,10 @@ def vet(subject_addr, data, extra=None):
         if not c.get("_plain") and med and len(allp) >= 4 and abs(ppsf(c["sold_price"], c["sqft"]) - med) / med > OUTLIER:
             c["_flags"].append("price outlier"); c["reject_default"] = True
     basis = [c for c in usable if not c.get("reject_default")]
-    bp = [ppsf(c["sold_price"], c["sqft"]) for c in basis if not c.get("_plain")] + exp
-    plain_prices = [float(c["sold_price"]) for c in basis if c.get("_plain")]
+    reno = [c for c in basis if (c.get("condition") or "").lower() == "renovated"]
+    chosen, reno_used = (reno, True) if len(reno) >= 2 else (basis, False)       # after-repair value = what FIXED-UP homes sell for
+    bp = [ppsf(c["sold_price"], c["sqft"]) for c in chosen if not c.get("_plain")] + ([] if reno_used else exp)
+    plain_prices = [float(c["sold_price"]) for c in chosen if c.get("_plain")]
     implied = ([v * subj["sqft"] for v in bp] if subj.get("sqft") else []) + plain_prices      # each comp's implied value for the subject
     ai_arv = (data.get("arv") or {}).get("value")
     arv, why, n = None, "", len(bp) + len(plain_prices)
@@ -232,6 +234,9 @@ def vet(subject_addr, data, extra=None):
     elif implied and subj.get("sqft"):
         arv = round(statistics.median(implied) / 1000.0) * 1000
         why = "Median of %d sold comps within %.1f mi, each scaled to the subject's %d sqft%s." % (len(implied), widened and WIDEN_MI or MAX_MI, subj["sqft"], (" (%d same-block comps with a different size used at their sale price)" % len(plain_prices)) if plain_prices else "")
+        if reno_used: why += " Based on the %d RENOVATED comps (after-repair value), not the as-is sales." % len(reno)
+        elif subj.get("condition") and any(w in str(subj["condition"]).lower() for w in ("distress", "below", "fixer", "as-is", "poor", "needs")):
+            why += " NOTE: the subject needs work and fewer than 2 comps were clearly renovated, so this may be LOW for a fully fixed-up home."
     elif len(keep) >= 2:
         pr = [c["sold_price"] for c in keep if c.get("sold_price")]
         if pr and not subj.get("sqft"): arv = round(statistics.median(pr) / 1000.0) * 1000; why = "Median sold price of %d comps (subject sqft unknown, so not size-adjusted)." % len(pr)
@@ -330,6 +335,16 @@ def real_comps(addr, radius, window, token, subj=None):
 MAP_ACTOR = "tri_angle~redfin-search"
 MAP_MAX = 20                     # $0.0005 per home + $0.0035 start: 20 homes = 1.35 cents at most
 _PT_CODE = {6: "sfh_detached", 3: "condo_coop", 13: "townhouse_interior", 4: None, 8: "land", 10: None}
+
+RENO_WORDS = ("renovat", "remodel", "fully updated", "completely updated", "totally updated", "gut ", "gutted", "new kitchen", "brand new", "all new", "like new", "turn-key", "turnkey", "turn key", "stunning", "designer", "luxury finish", "high-end", "high end", "newly updated", "new roof", "new hvac", "move-in ready", "move in ready", "fully rehabbed", "completely rehabbed", "quartz", "waterfall")
+BAD_WORDS = ("as-is", "as is", "fixer", "investor", "tlc", "needs work", "needs updating", "needs renovation", "needs repair", "handyman", "rehab", "estate sale", "bring your", "cash only", "dated", "original condition", "sold as", "contractor special", "potential")
+def classify_condition(text):
+    t = (text or "").lower()
+    if not t: return None
+    bad = sum(1 for w in BAD_WORDS if w in t); good = sum(1 for w in RENO_WORDS if w in t)
+    if bad and bad >= good: return "distressed"
+    if good >= 2: return "renovated"
+    return "average" if good == 0 else None
 def _run_actor(actor, body, token, timeout=90, cap="0.03"):
     url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=80&maxTotalChargeUsd=%s" % (actor, cap)
     with tempfile.TemporaryDirectory() as td:
@@ -370,7 +385,7 @@ def map_comps(addr, subj, radius, window, token):
         dist = round(_miles((la, lo), (ll["latitude"], ll["longitude"])), 2) if ll.get("latitude") is not None else None
         out.append({"address": "%s%s, %s, %s %s" % (st, (" " + unit) if unit and unit not in st else "", r.get("city") or "", r.get("state") or "", r.get("zip") or ""),
                     "sold_price": price, "sold_date": date, "beds": r.get("beds"), "baths": r.get("baths"), "sqft": g("sqFt"), "distance_mi": dist, "dist_src": "map",
-                    "condition": None, "url": ("https://www.redfin.com" + r["url"]) if str(r.get("url") or "").startswith("/") else r.get("url"), "verified": True,
+                    "condition": classify_condition(r.get("listingRemarks")), "url": ("https://www.redfin.com" + r["url"]) if str(r.get("url") or "").startswith("/") else r.get("url"), "verified": True,
                     "house_type": _PT_CODE.get(r.get("propertyType")), "listing_status": "sold", "style": None, "year_built": g("yearBuilt"),
                     "src_trusted": True, "source": "redfin-map"})
     return out
