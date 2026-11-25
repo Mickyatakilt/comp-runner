@@ -401,13 +401,13 @@ def map_comps(addr, subj, radius, window, token, max_results=None):
                     "src_trusted": True, "source": "redfin-map"})
     return out
 
-def _codex(prompt, timeout):
-    """One Codex web-search call. Returns (data, error)."""
+def _codex(prompt, timeout, schema=None, search=True):
+    """One Codex (OpenAI, ChatGPT plan, no API credit) call. Returns (data, error)."""
     with tempfile.TemporaryDirectory() as td:
         out, sch = os.path.join(td, "o.json"), os.path.join(td, "schema.json")
-        json.dump(SCHEMA, open(sch, "w"))
+        json.dump(schema or SCHEMA, open(sch, "w"))
         try:
-            r = subprocess.run([CODEX, "--search", "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only",
+            r = subprocess.run([CODEX] + (["--search"] if search else []) + ["exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only",
                                 "-C", td, "--output-schema", sch, "-o", out, "-"],
                                input=prompt, text=True, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -417,6 +417,53 @@ def _codex(prompt, timeout):
         raw = open(out).read().strip()
         try: return json.loads(raw), None
         except Exception: return None, "bad JSON: " + raw[:300]
+
+
+# ---------------- SECOND OPINION: a separate OpenAI (Codex) pass that audits the finished comps + ARV ----------------
+CHECK_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["verdict", "own_arv", "concerns", "doubtful"],
+                "properties": {"verdict": {"type": "string", "enum": ["agree", "mixed", "disagree"]},
+                               "own_arv": {"type": ["number", "null"]},
+                               "concerns": {"type": "array", "maxItems": 5, "items": {"type": "string"}},
+                               "doubtful": {"type": "array", "maxItems": 6, "items": {"type": "object", "additionalProperties": False, "required": ["address", "reason"],
+                                            "properties": {"address": {"type": "string"}, "reason": {"type": "string"}}}}}}
+CHECK_PROMPT = """You are a skeptical real-estate wholesaler double-checking an automated comp report. Judge ONLY from the data below plus general market knowledge. Do not browse. Do not invent facts.
+SUBJECT: {subj}
+COMPS (all closed sales; condition is read from the listing text; distance is measured by map):
+{comps}
+OUR ARV (after-repair value, i.e. what a renovated version of the subject should sell for): {arv}  ({why})
+Tasks: 1) Are these comps appropriate for the subject (same kind of home, close, recent, similar size and finish)? 2) Give YOUR OWN single after-repair ARV from these comps (whole dollars, null if the comps are too weak). 3) List concerns in short plain sentences (max 5). 4) List any comps you doubt (address + short reason), for example a different style or an unusual price.
+verdict = agree if our ARV is within about 8% of yours and the comps look right; disagree if you are more than about 15% apart or the comps look wrong; otherwise mixed."""
+
+def second_opinion(data, timeout=90):
+    try:
+        subj = data.get("subject") or {}
+        cs = data.get("comps") or []
+        if not cs: return None
+        lines = "\n".join("- %s | sold $%s on %s | %s sqft | %s bd | %.2f mi | condition: %s | built %s" % (
+            c.get("address"), format(int(c.get("sold_price") or 0), ","), c.get("sold_date"), c.get("sqft"), c.get("beds"), float(c.get("distance_mi") or 0),
+            c.get("condition") or "unknown", c.get("year_built") or "?") for c in cs[:8])
+        sj = "%s | %s bd, %s ba, %s sqft, built %s, type %s, style %s, condition: %s" % (subj.get("address"), subj.get("beds"), subj.get("baths"), subj.get("sqft"), subj.get("year_built"),
+                                                                                    subj.get("house_type"), subj.get("style"), subj.get("condition"))
+        a = data.get("arv") or {}
+        d, err = _codex(CHECK_PROMPT.format(subj=sj, comps=lines, arv=a.get("value"), why=a.get("reason")), timeout, schema=CHECK_SCHEMA, search=False)
+        if not d: return {"verdict": "unavailable", "error": (err or "")[:120]}
+        own = d.get("own_arv"); ours = a.get("value")
+        d["gap_pct"] = round(abs(own - ours) / ours * 100) if own and ours else None
+        if d["verdict"] == "agree" and d["gap_pct"] is not None and d["gap_pct"] > 15: d["verdict"] = "mixed"
+        return d
+    except Exception as e:
+        return {"verdict": "unavailable", "error": repr(e)[:120]}
+
+def attach_check(data, t0):
+    """Run the second opinion if there is time, store it in quality.check, and lower confidence when it disagrees. Never changes the ARV itself."""
+    q = data.setdefault("quality", {})
+    if time.time() - t0 > 250:
+        q["check"] = {"verdict": "skipped", "error": "out of time"}; return
+    ck = second_opinion(data, timeout=int(max(40, min(90, 320 - (time.time() - t0)))))
+    if ck is None: return
+    q["check"] = ck
+    if ck.get("verdict") == "disagree": q["level"] = "low"
+    elif ck.get("verdict") == "mixed" and q.get("level") == "high": q["level"] = "medium"
 
 def run(addr, extra=None, timeout=210):
     """Returns dict: {"ok":True,"data":{...}} or {"ok":False,"error":"..."}.
@@ -480,6 +527,7 @@ def run(addr, extra=None, timeout=210):
                 except Exception as e: data["quality"]["wide_lookup_error"] = repr(e)[:200]
             else:
                 data["quality"]["wide_lookup"] = {"homes": 0}
+        if not (extra or {}).get("more"): attach_check(data, t0)
         return {"ok": True, "data": data}
     if q.get("usable", 0) < MIN_GOOD and time.time() - t0 < 200 and not (extra or {}).get("more"):
         rej = "\n".join("- %s: %s" % (d["address"], d["why"]) for d in q.get("dropped", []))
@@ -500,6 +548,7 @@ def run(addr, extra=None, timeout=210):
                 data = combo
             except Exception:
                 pass
+    if not (extra or {}).get("more"): attach_check(data, t0)
     return {"ok": True, "data": data}
 
 if __name__ == "__main__":
