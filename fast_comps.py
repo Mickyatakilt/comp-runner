@@ -211,8 +211,11 @@ def vet(subject_addr, data, extra=None):
         for c in keep:
             if c["_style_diff"]: dropped.append((c.get("address"), "different age/style (%s)" % (c.get("_age_note") or "%s vs %s" % (c.get("style"), subj.get("style")))))
         keep = same
-    keep.sort(key=lambda c: (c["_dist"], c["_age_mo"] or 0))
-    keep = keep[:6]
+    if needs:      # subject needs work: after-repair value comes from RENOVATED comps, so they must not be cut by distance
+        keep.sort(key=lambda c: (not isreno(c), c["_dist"], c["_age_mo"] or 0)); keep = keep[:8]
+        keep.sort(key=lambda c: (c["_dist"], c["_age_mo"] or 0))
+    else:
+        keep.sort(key=lambda c: (c["_dist"], c["_age_mo"] or 0)); keep = keep[:6]
     # ARV: median $/sqft of usable comps x subject sqft (distressed + outliers excluded), never the AI's guess
     ex = [x for x in ((extra or {}).get("exclude") or []) if isinstance(x, dict)]
     def ppsf(price, sqft):
@@ -280,7 +283,7 @@ def vet(subject_addr, data, extra=None):
     data["comps"] = keep
     data["quality"] = {"level": level, "usable": nuse, "radius_mi": max([c["distance_mi"] for c in keep] + [0]) if keep and widened else MAX_MI, "widened": widened,
                        "sqft_conflict": conflict, "ai_arv": ai_arv, "needs_work": needs, "reno_n": len(reno) if reno_used else sum(1 for c in basis if isreno(c)),
-                       "dropped": [{"address": a, "why": w} for a, w in dropped][:12]}
+                       "dropped": [{"address": a, "why": w} for a, w in dropped][:40]}
     n_drop = len(dropped)
     note = "Checked by code: %d comp(s) kept, %d removed (too far, wrong size or type, not sold, or the subject itself)." % (len(keep), n_drop)
     if widened: note += " Search was widened to " + widened + " because fewer than %d were closer." % MIN_GOOD
