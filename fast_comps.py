@@ -211,7 +211,7 @@ def vet(subject_addr, data, extra=None):
         for c in keep:
             if c["_style_diff"]: dropped.append((c.get("address"), "different age/style (%s)" % (c.get("_age_note") or "%s vs %s" % (c.get("style"), subj.get("style")))))
         keep = same
-    if needs:      # subject needs work: after-repair value comes from RENOVATED comps, so they must not be cut by distance
+    if True:       # ARV = after-repair value, which comes from RENOVATED comps, so they must not be cut by distance
         keep.sort(key=lambda c: (not isreno(c), c["_dist"], c["_age_mo"] or 0)); keep = keep[:8]
         keep.sort(key=lambda c: (c["_dist"], c["_age_mo"] or 0))
     else:
