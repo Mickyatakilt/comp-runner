@@ -312,9 +312,9 @@ def _apify_filters(subj):
     except Exception: pass
     return f
 
-def _apify_rows(addr, radius, window, token, timeout=90, filters=None):
+def _apify_rows(addr, radius, window, token, timeout=45, filters=None):
     """Sold homes around an address from real records. Returns list of rows or None on any failure."""
-    url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=80&maxTotalChargeUsd=0.30" % APIFY_ACTOR
+    url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=40&maxTotalChargeUsd=0.30" % APIFY_ACTOR
     body = {"addresses": [addr], "radiusMiles": radius, "soldWindow": window, "maxItems": APIFY_MAX_ITEMS}
     body.update(filters or {})
     with tempfile.TemporaryDirectory() as td:
@@ -357,8 +357,8 @@ def classify_condition(text):
     if bad and bad >= good: return "distressed"
     if good >= 2: return "renovated"
     return "average" if not bad else None
-def _run_actor(actor, body, token, timeout=90, cap="0.03"):
-    url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=80&maxTotalChargeUsd=%s" % (actor, cap)
+def _run_actor(actor, body, token, timeout=45, cap="0.03"):
+    url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=40&maxTotalChargeUsd=%s" % (actor, cap)
     with tempfile.TemporaryDirectory() as td:
         hf = os.path.join(td, "h"); open(hf, "w").write("Authorization: Bearer " + token + "\nContent-Type: application/json\n"); os.chmod(hf, 0o600)
         try:
@@ -499,7 +499,8 @@ def run(addr, extra=None, timeout=210):
         more = bool((extra or {}).get("more"))
         win, rad = ("sold-2yr", 1.0) if more else ("sold-1yr", 0.35)
         real = map_comps(addr, data.get("subject"), rad, win, tok)
-        if real is None: real = real_comps(addr, rad, win, tok, data.get("subject"))     # pricier backup source (about 6 cents)
+        if not real and time.time() - t0 < 170: real = real_comps(addr, rad, win, tok, data.get("subject"))     # pricier backup source (about 6 cents)
+        if not real: real = None                      # nothing usable from real records: keep the web-search comps and say so
         if real is not None:
             data["comps"] = real
             data["notes"] = "Comps are real sold records (Redfin/MLS). " + (data.get("notes") or "")
@@ -516,8 +517,8 @@ def run(addr, extra=None, timeout=210):
     q = data.get("quality") or {}
     if real is not None:
         q["source"] = "redfin"
-        if (q.get("usable", 0) < MIN_GOOD or (q.get("needs_work") and q.get("reno_n", 0) < 2)) and not (extra or {}).get("more"):      # widen once: 1 mile, 2 years (vet still caps age at 18 months)
-            more_rows = map_comps(addr, first.get("subject"), 1.0, "sold-2yr", tok, 60) or real_comps(addr, 1.0, "sold-2yr", tok, first.get("subject"))
+        if (q.get("usable", 0) < MIN_GOOD or (q.get("needs_work") and q.get("reno_n", 0) < 2)) and not (extra or {}).get("more") and time.time() - t0 < 200:      # widen once: 1 mile, 2 years (vet still caps age at 18 months)
+            more_rows = map_comps(addr, first.get("subject"), 1.0, "sold-2yr", tok, 60) or (real_comps(addr, 1.0, "sold-2yr", tok, first.get("subject")) if time.time() - t0 < 230 else None)
             if more_rows:
                 seen = {_key(c.get("address")) for c in raw_comps}
                 raw_comps += [c for c in more_rows if _key(c.get("address")) not in seen]
