@@ -129,7 +129,7 @@ def _check(c, subj, today):
     st, ct = subj.get("house_type"), c.get("house_type")
     try:
         sb, cb = subj.get("beds"), c.get("beds")
-        if sb and cb and abs(float(sb) - float(cb)) >= 3: drop.append("bedrooms %s vs subject %s" % (int(cb), int(sb)))
+        if sb and cb and not subj.get("_beds_bad") and abs(float(sb) - float(cb)) >= 3: drop.append("bedrooms %s vs subject %s" % (int(cb), int(sb)))
     except Exception: pass
     if ct == "multifamily" and st != "multifamily": drop.append("multi-unit building (duplex/quadruplex etc.), not a single-family row house")
     elif st and ct and st != ct:
@@ -180,6 +180,10 @@ def vet(subject_addr, data, extra=None):
     sp0, sl0 = subj.get("sqft_public_record"), subj.get("sqft_listing")
     conflict0 = bool(sp0 and sl0 and abs(sp0 - sl0) / max(sp0, sl0) > 0.2)
     if conflict0: subj["_cands"] = sorted({x for x in (subj.get("sqft"), sp0, sl0) if x})
+    try:      # a subject with many bedrooms but tiny size is probably a data error: do not filter other homes by its bedroom count
+        _b, _q = subj.get("beds"), subj.get("sqft_public_record") or subj.get("sqft")
+        if _b and _q and float(_b) >= 6 and float(_q) / float(_b) < 320: subj["_beds_bad"] = True
+    except Exception: pass
     dropped, pool = [], []
     for c in [x for x in (data.get("comps") or []) if isinstance(x, dict)]:
         if skey and _key(c.get("address")) == skey: dropped.append((c.get("address"), "is the subject itself")); continue
@@ -286,7 +290,7 @@ def vet(subject_addr, data, extra=None):
         conflict = "Size sources disagree: public record %d sqft vs listing %d sqft. Confirm above-grade size before trusting the ARV." % (sp, sl)
     for c in keep:
         for k in [k for k in c if k.startswith("_")]: del c[k]
-    subj.pop("_cands", None)
+    subj.pop("_cands", None); subj.pop("_beds_bad", None)
     data["comps"] = keep
     try:
         sbd, ssq = subj.get("beds"), subj.get("sqft_public_record") or subj.get("sqft")
