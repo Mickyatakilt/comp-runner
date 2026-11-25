@@ -237,6 +237,11 @@ def vet(subject_addr, data, extra=None):
         if pr and not subj.get("sqft"): arv = round(statistics.median(pr) / 1000.0) * 1000; why = "Median sold price of %d comps (subject sqft unknown, so not size-adjusted)." % len(pr)
     if ai_arv and arv and abs(ai_arv - arv) / arv > 0.15: why += " (The AI's own guess of $%s was ignored.)" % format(int(ai_arv), ",")
     nuse = max(len(basis), n); level = "high" if (nuse >= 4 and not widened and not conflict0) else ("medium" if nuse >= MIN_GOOD else "low")
+    if arv and len(implied) >= 3:
+        spread = (max(implied) - min(implied)) / statistics.median(implied)
+        if spread > 0.5:
+            level = "low" if spread > 0.8 else ("medium" if level == "high" else level)
+            why += " WARNING: comps vary a lot ($%sk to $%sk). Check condition and style before trusting this." % (format(int(min(implied) / 1000), ","), format(int(max(implied) / 1000), ","))
     if not arv and not why: why = "No usable close comps, so no ARV was set. Add an ARV by hand or try More comps."
     elif level == "low" and arv: why += " LOW CONFIDENCE: only %d close comp(s)." % nuse
     data["arv"] = {"value": arv, "reason": why}
@@ -273,11 +278,28 @@ def vet(subject_addr, data, extra=None):
 
 # ---------------- REAL SOLD RECORDS (Redfin/MLS via Apify, pennies per lookup) ----------------
 APIFY_ACTOR = "swerve~redfin-sold-comps"
-APIFY_MAX_ITEMS = 40            # ~$0.20 max per search at $0.005/result
-def _apify_rows(addr, radius, window, token, timeout=90):
+APIFY_MAX_ITEMS = 15            # $0.005 per result: at most ~8 cents, usually 3-5 cents
+def _apify_filters(subj):
+    """Ask the paid source for only look-alike homes, so we are not billed for condos, mansions, etc."""
+    f = {}
+    try:
+        sq = subj.get("sqft_public_record") or subj.get("sqft")
+        lst = subj.get("sqft_listing")
+        sizes = [x for x in (sq, lst, subj.get("sqft")) if x]
+        if sizes: f["minSqft"] = int(min(sizes) * 0.5); f["maxSqft"] = int(max(sizes) * 1.7)
+        b = subj.get("beds")
+        if b: f["minBeds"] = max(0, int(b) - 1); f["maxBeds"] = int(b) + 1
+        ht = subj.get("house_type")
+        pt = {"sfh_detached": ["house"], "semi_detached": ["house", "townhouse"], "townhouse_end": ["townhouse"], "townhouse_interior": ["townhouse"], "condo_coop": ["condo"]}.get(ht)
+        if pt: f["propertyTypes"] = pt
+    except Exception: pass
+    return f
+
+def _apify_rows(addr, radius, window, token, timeout=90, filters=None):
     """Sold homes around an address from real records. Returns list of rows or None on any failure."""
     url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=80&maxTotalChargeUsd=0.30" % APIFY_ACTOR
     body = {"addresses": [addr], "radiusMiles": radius, "soldWindow": window, "maxItems": APIFY_MAX_ITEMS}
+    body.update(filters or {})
     with tempfile.TemporaryDirectory() as td:
         hf = os.path.join(td, "h"); open(hf, "w").write("Authorization: Bearer " + token + "\nContent-Type: application/json\n"); os.chmod(hf, 0o600)
         try:
@@ -298,8 +320,8 @@ def _apify_comp(r):
             "condition": None, "url": r.get("url"), "verified": True, "house_type": ht, "listing_status": "sold", "style": None,
             "year_built": r.get("yearBuilt"), "src_trusted": True, "source": "redfin-" + str(r.get("saleSource") or "record")}
 
-def real_comps(addr, radius, window, token):
-    rows = _apify_rows(addr, radius, window, token)
+def real_comps(addr, radius, window, token, subj=None):
+    rows = _apify_rows(addr, radius, window, token, filters=_apify_filters(subj or {}))
     if rows is None: return None
     return [c for c in (_apify_comp(r) for r in rows if isinstance(r, dict)) if c]
 
@@ -350,7 +372,7 @@ def run(addr, extra=None, timeout=210):
     real = None
     if tok:
         more = bool((extra or {}).get("more"))
-        real = real_comps(addr, 1.0 if more else 0.5, "sold-2yr" if more else "sold-1yr", tok)
+        real = real_comps(addr, 1.0 if more else 0.5, "sold-2yr" if more else "sold-1yr", tok, data.get("subject"))
         if real is not None:
             data["comps"] = real
             data["notes"] = "Comps are real sold records (Redfin/MLS). " + (data.get("notes") or "")
@@ -368,7 +390,7 @@ def run(addr, extra=None, timeout=210):
     if real is not None:
         q["source"] = "redfin"
         if q.get("usable", 0) < MIN_GOOD and not (extra or {}).get("more"):      # widen once: 1 mile, 2 years (vet still caps age at 18 months)
-            more_rows = real_comps(addr, 1.0, "sold-2yr", tok)
+            more_rows = real_comps(addr, 1.0, "sold-2yr", tok, first.get("subject"))
             if more_rows:
                 seen = {_key(c.get("address")) for c in raw_comps}
                 raw_comps += [c for c in more_rows if _key(c.get("address")) not in seen]
