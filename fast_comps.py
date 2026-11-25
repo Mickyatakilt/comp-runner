@@ -230,7 +230,8 @@ def vet(subject_addr, data, extra=None):
             c["_flags"].append("price outlier"); c["reject_default"] = True
     basis = [c for c in usable if not c.get("reject_default")]
     reno = [c for c in basis if (c.get("condition") or "").lower() == "renovated"]
-    chosen, reno_used = (reno, True) if len(reno) >= 2 else (basis, False)       # after-repair value = what FIXED-UP homes sell for
+    reno_ok = [c for c in reno if not c.get("_plain")]            # size-matched renovated comps are the solid ones
+    chosen, reno_used = (reno, True) if (len(reno_ok) >= 2 or len(reno) >= 3) else (basis, False)       # after-repair value = what FIXED-UP homes sell for
     bp = [ppsf(c["sold_price"], c["sqft"]) for c in chosen if not c.get("_plain")] + ([] if reno_used else exp)
     plain_prices = [float(c["sold_price"]) for c in chosen if c.get("_plain")]
     implied = ([v * subj["sqft"] for v in bp] if subj.get("sqft") else []) + plain_prices      # each comp's implied value for the subject
@@ -449,7 +450,8 @@ def second_opinion(data, timeout=90):
         if not d: return {"verdict": "unavailable", "error": (err or "")[:120]}
         own = d.get("own_arv"); ours = a.get("value")
         d["gap_pct"] = round(abs(own - ours) / ours * 100) if own and ours else None
-        if d["verdict"] == "agree" and d["gap_pct"] is not None and d["gap_pct"] > 15: d["verdict"] = "mixed"
+        if d["gap_pct"] is not None:      # the numbers decide the verdict, the model's concerns are advisory
+            d["verdict"] = "agree" if d["gap_pct"] <= 8 else ("mixed" if d["gap_pct"] <= 15 else "disagree")
         return d
     except Exception as e:
         return {"verdict": "unavailable", "error": repr(e)[:120]}
