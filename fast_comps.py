@@ -127,8 +127,14 @@ def _check(c, subj, today):
     elif c.get("dist_src") != "map": flag.append("distance unconfirmed (AI figure)")
     c["_dist"] = dist
     st, ct = subj.get("house_type"), c.get("house_type")
-    if st and ct and st != ct:
-        if st in TH and ct in TH and c.get("src_trusted"): pass          # real records say just "Townhouse": end vs interior unknown, allow
+    try:
+        sb, cb = subj.get("beds"), c.get("beds")
+        if sb and cb and abs(float(sb) - float(cb)) >= 3: drop.append("bedrooms %s vs subject %s" % (int(cb), int(sb)))
+    except Exception: pass
+    if ct == "multifamily" and st != "multifamily": drop.append("multi-unit building (duplex/quadruplex etc.), not a single-family row house")
+    elif st and ct and st != ct:
+        if st in TH and ct in TH and c.get("src_trusted"): pass
+        elif {st, ct} <= set(TH + ("semi_detached",)): flag.append("semi/end/interior mix")          # real records say just "Townhouse": end vs interior unknown, allow
         elif st in TH and ct in TH: flag.append("%s (subject is %s)" % ("end unit" if ct == "townhouse_end" else "interior unit", "an end unit" if st == "townhouse_end" else "interior"))
         else: drop.append("different house type (%s vs %s)" % (ct, st))
     try:
@@ -238,11 +244,11 @@ def vet(subject_addr, data, extra=None):
     ai_arv = (data.get("arv") or {}).get("value")
     arv, why, n = None, "", len(bp) + len(plain_prices)
     pr_all = [c["sold_price"] for c in basis if c.get("sold_price")] + [float(x["price"]) for x in ex if x.get("price")]
-    if conflict0 and len(pr_all) >= 2:
+    if conflict0 and len(pr_all) >= MIN_GOOD:
         arv = round(statistics.median(pr_all) / 1000.0) * 1000
         why = "Subject size is unclear (public record %d vs listing %d sqft), so this is the plain median sold price of %d comps, NOT size-adjusted." % (sp0, sl0, len(pr_all))
-    elif n < 2 and (bp or keep):
-        why = "Only %d usable close comp(s), too few to set an ARV. Use More comps or enter your own ARV." % n
+    elif n < MIN_GOOD and (bp or keep or conflict0):
+        why = "Only %d usable close comp(s), too few to set a reliable ARV (we need %d). Use Paste MLS comps, More comps, or enter your own ARV." % (n, MIN_GOOD)
     elif implied and subj.get("sqft"):
         arv = round(statistics.median(implied) / 1000.0) * 1000
         why = "Median of %d sold comps within %.1f mi, each scaled to the subject's %d sqft%s." % (len(implied), widened and WIDEN_MI or MAX_MI, subj["sqft"], (" (%d same-block comps with a different size used at their sale price)" % len(plain_prices)) if plain_prices else "")
@@ -282,6 +288,12 @@ def vet(subject_addr, data, extra=None):
         for k in [k for k in c if k.startswith("_")]: del c[k]
     subj.pop("_cands", None)
     data["comps"] = keep
+    try:
+        sbd, ssq = subj.get("beds"), subj.get("sqft_public_record") or subj.get("sqft")
+        if sbd and ssq and float(sbd) >= 6 and float(ssq) / float(sbd) < 320:
+            w = "The subject shows %d bedrooms in %d sqft, which looks like a multi-unit or a data error. Confirm what the house really is." % (int(sbd), int(ssq))
+            conflict = (conflict + " " + w) if conflict else w
+    except Exception: pass
     data["quality"] = {"level": level, "usable": nuse, "radius_mi": max([c["distance_mi"] for c in keep] + [0]) if keep and widened else MAX_MI, "widened": widened,
                        "sqft_conflict": conflict, "ai_arv": ai_arv, "needs_work": needs, "reno_n": len(reno) if reno_used else sum(1 for c in basis if isreno(c)),
                        "dropped": [{"address": a, "why": w} for a, w in dropped][:40]}
@@ -329,7 +341,7 @@ def _apify_rows(addr, radius, window, token, timeout=45, filters=None):
 
 def _apify_comp(r):
     t = (r.get("propertyType") or "").lower()
-    ht = "sfh_detached" if "single" in t else ("townhouse_interior" if "town" in t else ("condo_coop" if "condo" in t else ("land" if "land" in t or "vacant" in t else ("manufactured" if "manufact" in t or "mobile" in t else None))))
+    ht = "multifamily" if ("multi" in t or "duplex" in t or "plex" in t) else "sfh_detached" if "single" in t else ("townhouse_interior" if "town" in t else ("condo_coop" if "condo" in t else ("land" if "land" in t or "vacant" in t else ("manufactured" if "manufact" in t or "mobile" in t else None))))
     if not r.get("soldPrice") or not r.get("soldDate") or not r.get("streetAddress"): return None
     a = r["streetAddress"] + ((" " + r["unitNumber"]) if r.get("unitNumber") and r["unitNumber"] not in r["streetAddress"] else "")
     return {"address": "%s, %s, %s %s" % (a, r.get("city") or "", r.get("state") or "", r.get("zip") or ""), "sold_price": r["soldPrice"], "sold_date": r["soldDate"],
@@ -346,7 +358,8 @@ def real_comps(addr, radius, window, token, subj=None):
 # ---- cheapest real-records source: Redfin map search around the subject (about 1 cent per lookup) ----
 MAP_ACTOR = "tri_angle~redfin-search"
 MAP_MAX = 20                     # $0.0005 per home + $0.0035 start: 20 homes = 1.35 cents at most
-_PT_CODE = {6: "sfh_detached", 3: "condo_coop", 13: "townhouse_interior", 4: None, 8: "land", 10: None}
+_PT_CODE = {6: "sfh_detached", 3: "condo_coop", 13: "townhouse_interior", 4: "multifamily", 8: "land", 10: None}
+MULTI_RE = re.compile(r"\b(duplex|triplex|quadruplex|quadplex|fourplex|four[- ]plex|multi[- ]?family|[2-9][- ]unit|(two|three|four|2|3|4)[- ]units?)\b")
 
 RENO_RE = [re.compile(x) for x in (r"\b(fully|completely|totally|newly|beautifully|meticulously|recently|tastefully|thoughtfully)[ -](renovated|remodeled|remodelled|restored|updated|rehabbed|reimagined)", r"\bgut (renovat|rehab)", r"\bturn[- ]?key\b", r"\bwaterfall\b", r"\bquartz\b", r"\bchef", r"\bdesigner\b", r"\bbrand[- ]new\b", r"\bmodern luxury\b", r"\bnew construction\b", r"\bnew (roof|hvac|kitchen|bath)", r"\bmove[- ]in[- ]ready\b", r"\bfully renovated\b")]
 BAD_RE = [re.compile(x) for x in (r"\bas[- ]is\b", r"\bfixer", r"\binvestor", r"\btlc\b", r"\bneeds? (work|updating|renovation|repairs?|rehab)", r"\bhandyman", r"\bsignificant work\b", r"\bestate sale\b", r"\bbring your (vision|contractor)", r"\bcash (buyer|only)\b", r"\bdated\b", r"\boriginal condition\b", r"\bcourt[- ]ordered\b", r"\bready to renovate\b", r"\bproject house\b", r"\bfor its next chapter\b", r"\bpossibilities are endless\b")]
@@ -398,7 +411,7 @@ def map_comps(addr, subj, radius, window, token, max_results=None):
         out.append({"address": "%s%s, %s, %s %s" % (st, (" " + unit) if unit and unit not in st else "", r.get("city") or "", r.get("state") or "", r.get("zip") or ""),
                     "sold_price": price, "sold_date": date, "beds": r.get("beds"), "baths": r.get("baths"), "sqft": g("sqFt"), "distance_mi": dist, "dist_src": "map",
                     "condition": classify_condition(r.get("listingRemarks")), "url": ("https://www.redfin.com" + r["url"]) if str(r.get("url") or "").startswith("/") else r.get("url"), "verified": True,
-                    "house_type": _PT_CODE.get(r.get("propertyType")), "listing_status": "sold", "style": None, "year_built": g("yearBuilt"),
+                    "house_type": "multifamily" if MULTI_RE.search((r.get("listingRemarks") or "").lower()) else _PT_CODE.get(r.get("propertyType")), "listing_status": "sold", "style": None, "year_built": g("yearBuilt"),
                     "src_trusted": True, "source": "redfin-map"})
     return out
 
