@@ -325,6 +325,56 @@ def real_comps(addr, radius, window, token, subj=None):
     if rows is None: return None
     return [c for c in (_apify_comp(r) for r in rows if isinstance(r, dict)) if c]
 
+
+# ---- cheapest real-records source: Redfin map search around the subject (about 1 cent per lookup) ----
+MAP_ACTOR = "tri_angle~redfin-search"
+MAP_MAX = 40                     # $0.0005 per home + $0.0035 start: 40 homes = under 2.5 cents, usually ~1 cent
+_PT_CODE = {6: "sfh_detached", 3: "condo_coop", 13: "townhouse_interior", 4: None, 8: "land", 10: None}
+def _run_actor(actor, body, token, timeout=90, cap="0.03"):
+    url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=80&maxTotalChargeUsd=%s" % (actor, cap)
+    with tempfile.TemporaryDirectory() as td:
+        hf = os.path.join(td, "h"); open(hf, "w").write("Authorization: Bearer " + token + "\nContent-Type: application/json\n"); os.chmod(hf, 0o600)
+        try:
+            r = subprocess.run(["curl", "-sS", "-m", str(timeout), "-X", "POST", "-H", "@" + hf, "--data-binary", "@-", url],
+                               input=json.dumps(body), text=True, capture_output=True, timeout=timeout + 10)
+            rows = json.loads(r.stdout)
+            return rows if isinstance(rows, list) else None
+        except Exception:
+            return None
+
+def map_comps(addr, subj, radius, window, token):
+    """Sold homes inside a box around the subject from Redfin's map. Distance is computed here from coordinates. None = lookup failed."""
+    import math
+    pt = _geo(addr)
+    zm = re.findall(r"\b(\d{5})\b", addr or "") or re.findall(r"\b(\d{5})\b", str((subj or {}).get("address") or ""))
+    if not pt or not zm: return None
+    la, lo = pt; d = radius / 69.0; e = d / max(math.cos(math.radians(la)), 0.01)
+    ht = (subj or {}).get("house_type")
+    ptype = {"sfh_detached": "house", "townhouse_end": "townhouse", "townhouse_interior": "townhouse", "semi_detached": None, "condo_coop": "condo", "land": "land"}.get(ht)
+    flt = ("property-type=%s," % ptype if ptype else "") + "include=%s,viewport=%.5f:%.5f:%.5f:%.5f,no-outline" % (window, la + d, la - d, lo + e, lo - e)
+    rows = _run_actor(MAP_ACTOR, {"searchUrls": [{"url": "https://www.redfin.com/zipcode/%s/filter/%s" % (zm[-1], flt)}], "zoomIn": False, "maxResults": MAP_MAX}, token)
+    if rows is None: return None
+    out = []
+    for r in rows:
+        if not isinstance(r, dict): continue
+        def g(k):
+            v = r.get(k)
+            return v.get("value") if isinstance(v, dict) else v
+        price, sd = g("price"), r.get("soldDate")
+        ll = (r.get("latLong") or {}).get("value") or {}
+        st = g("streetLine")
+        if not price or not sd or not st: continue
+        try: date = datetime.datetime.utcfromtimestamp(float(sd) / 1000).date().isoformat()
+        except Exception: continue
+        unit = (g("unitNumber") or "").strip()
+        dist = round(_miles((la, lo), (ll["latitude"], ll["longitude"])), 2) if ll.get("latitude") is not None else None
+        out.append({"address": "%s%s, %s, %s %s" % (st, (" " + unit) if unit and unit not in st else "", r.get("city") or "", r.get("state") or "", r.get("zip") or ""),
+                    "sold_price": price, "sold_date": date, "beds": r.get("beds"), "baths": r.get("baths"), "sqft": g("sqFt"), "distance_mi": dist, "dist_src": "map",
+                    "condition": None, "url": ("https://www.redfin.com" + r["url"]) if str(r.get("url") or "").startswith("/") else r.get("url"), "verified": True,
+                    "house_type": _PT_CODE.get(r.get("propertyType")), "listing_status": "sold", "style": None, "year_built": g("yearBuilt"),
+                    "src_trusted": True, "source": "redfin-map"})
+    return out
+
 def _codex(prompt, timeout):
     """One Codex web-search call. Returns (data, error)."""
     with tempfile.TemporaryDirectory() as td:
@@ -372,7 +422,9 @@ def run(addr, extra=None, timeout=210):
     real = None
     if tok:
         more = bool((extra or {}).get("more"))
-        real = real_comps(addr, 1.0 if more else 0.5, "sold-2yr" if more else "sold-1yr", tok, data.get("subject"))
+        win, rad = ("sold-2yr", 1.0) if more else ("sold-1yr", 0.5)
+        real = map_comps(addr, data.get("subject"), rad, win, tok)
+        if real is None: real = real_comps(addr, rad, win, tok, data.get("subject"))     # pricier backup source (about 6 cents)
         if real is not None:
             data["comps"] = real
             data["notes"] = "Comps are real sold records (Redfin/MLS). " + (data.get("notes") or "")
@@ -390,7 +442,7 @@ def run(addr, extra=None, timeout=210):
     if real is not None:
         q["source"] = "redfin"
         if q.get("usable", 0) < MIN_GOOD and not (extra or {}).get("more"):      # widen once: 1 mile, 2 years (vet still caps age at 18 months)
-            more_rows = real_comps(addr, 1.0, "sold-2yr", tok, first.get("subject"))
+            more_rows = map_comps(addr, first.get("subject"), 1.0, "sold-2yr", tok) or real_comps(addr, 1.0, "sold-2yr", tok, first.get("subject"))
             if more_rows:
                 seen = {_key(c.get("address")) for c in raw_comps}
                 raw_comps += [c for c in more_rows if _key(c.get("address")) not in seen]
