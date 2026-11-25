@@ -471,8 +471,12 @@ def run(addr, extra=None, timeout=210):
                 raw_comps += [c for c in more_rows if _key(c.get("address")) not in seen]
                 combo = copy.deepcopy(first); combo["comps"] = raw_comps
                 try:
-                    vet(addr, combo, extra); combo["quality"]["source"] = "redfin"; data = combo
-                except Exception: pass
+                    vet(addr, combo, extra); combo["quality"]["source"] = "redfin"
+                    combo["quality"]["wide_lookup"] = {"homes": len(more_rows), "renovated_seen": sum(1 for c in more_rows if c.get("condition") == "renovated")}
+                    data = combo
+                except Exception as e: data["quality"]["wide_lookup_error"] = repr(e)[:200]
+            else:
+                data["quality"]["wide_lookup"] = {"homes": 0}
         return {"ok": True, "data": data}
     if q.get("usable", 0) < MIN_GOOD and time.time() - t0 < 200 and not (extra or {}).get("more"):
         rej = "\n".join("- %s: %s" % (d["address"], d["why"]) for d in q.get("dropped", []))
