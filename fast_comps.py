@@ -328,7 +328,7 @@ def real_comps(addr, radius, window, token, subj=None):
 
 # ---- cheapest real-records source: Redfin map search around the subject (about 1 cent per lookup) ----
 MAP_ACTOR = "tri_angle~redfin-search"
-MAP_MAX = 40                     # $0.0005 per home + $0.0035 start: 40 homes = under 2.5 cents, usually ~1 cent
+MAP_MAX = 20                     # $0.0005 per home + $0.0035 start: 20 homes = 1.35 cents at most
 _PT_CODE = {6: "sfh_detached", 3: "condo_coop", 13: "townhouse_interior", 4: None, 8: "land", 10: None}
 def _run_actor(actor, body, token, timeout=90, cap="0.03"):
     url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=80&maxTotalChargeUsd=%s" % (actor, cap)
@@ -422,7 +422,7 @@ def run(addr, extra=None, timeout=210):
     real = None
     if tok:
         more = bool((extra or {}).get("more"))
-        win, rad = ("sold-2yr", 1.0) if more else ("sold-1yr", 0.5)
+        win, rad = ("sold-2yr", 1.0) if more else ("sold-1yr", 0.35)
         real = map_comps(addr, data.get("subject"), rad, win, tok)
         if real is None: real = real_comps(addr, rad, win, tok, data.get("subject"))     # pricier backup source (about 6 cents)
         if real is not None:
