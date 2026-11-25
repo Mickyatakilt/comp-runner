@@ -336,15 +336,15 @@ MAP_ACTOR = "tri_angle~redfin-search"
 MAP_MAX = 20                     # $0.0005 per home + $0.0035 start: 20 homes = 1.35 cents at most
 _PT_CODE = {6: "sfh_detached", 3: "condo_coop", 13: "townhouse_interior", 4: None, 8: "land", 10: None}
 
-RENO_WORDS = ("renovat", "remodel", "fully updated", "completely updated", "totally updated", "gut ", "gutted", "new kitchen", "brand new", "all new", "like new", "turn-key", "turnkey", "turn key", "stunning", "designer", "luxury finish", "high-end", "high end", "newly updated", "new roof", "new hvac", "move-in ready", "move in ready", "fully rehabbed", "completely rehabbed", "quartz", "waterfall")
-BAD_WORDS = ("as-is", "as is", "fixer", "investor", "tlc", "needs work", "needs updating", "needs renovation", "needs repair", "handyman", "rehab", "estate sale", "bring your", "cash only", "dated", "original condition", "sold as", "contractor special", "potential")
+RENO_RE = [re.compile(x) for x in (r"\b(fully|completely|totally|newly|beautifully|meticulously|recently|tastefully|thoughtfully)[ -](renovated|remodeled|remodelled|restored|updated|rehabbed|reimagined)", r"\bgut (renovat|rehab)", r"\bturn[- ]?key\b", r"\bwaterfall\b", r"\bquartz\b", r"\bchef", r"\bdesigner\b", r"\bbrand[- ]new\b", r"\bmodern luxury\b", r"\bnew construction\b", r"\bnew (roof|hvac|kitchen|bath)", r"\bmove[- ]in[- ]ready\b", r"\bfully renovated\b")]
+BAD_RE = [re.compile(x) for x in (r"\bas[- ]is\b", r"\bfixer", r"\binvestor", r"\btlc\b", r"\bneeds? (work|updating|renovation|repairs?|rehab)", r"\bhandyman", r"\bsignificant work\b", r"\bestate sale\b", r"\bbring your (vision|contractor)", r"\bcash (buyer|only)\b", r"\bdated\b", r"\boriginal condition\b", r"\bcourt[- ]ordered\b", r"\bready to renovate\b", r"\bproject house\b", r"\bfor its next chapter\b", r"\bpossibilities are endless\b")]
 def classify_condition(text):
     t = (text or "").lower()
     if not t: return None
-    bad = sum(1 for w in BAD_WORDS if w in t); good = sum(1 for w in RENO_WORDS if w in t)
+    bad = sum(1 for r in BAD_RE if r.search(t)); good = sum(1 for r in RENO_RE if r.search(t))
     if bad and bad >= good: return "distressed"
     if good >= 2: return "renovated"
-    return "average" if good == 0 else None
+    return "average" if not bad else None
 def _run_actor(actor, body, token, timeout=90, cap="0.03"):
     url = "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items?timeout=80&maxTotalChargeUsd=%s" % (actor, cap)
     with tempfile.TemporaryDirectory() as td:
